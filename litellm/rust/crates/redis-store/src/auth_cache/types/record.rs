@@ -17,6 +17,29 @@ pub(in crate::auth_cache) fn decode(raw: Option<Vec<u8>>) -> Result<Option<Value
 pub(super) trait Field: Sized {
     fn read(value: &Value) -> Option<Self>;
     fn write(self) -> Value;
+
+    /// The value the model dumps for this field, or `None` when it leaves the field out.
+    fn dump(self) -> Option<Value> {
+        Some(self.write())
+    }
+}
+
+/// A field the model leaves out of its dump while it is `None`, as `exclude_if=_is_none` does.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ExcludedIfNone<T>(pub Option<T>);
+
+impl<T: Field> Field for ExcludedIfNone<T> {
+    fn read(value: &Value) -> Option<Self> {
+        <Option<T> as Field>::read(value).map(Self)
+    }
+
+    fn write(self) -> Value {
+        self.0.write()
+    }
+
+    fn dump(self) -> Option<Value> {
+        self.0.map(T::write)
+    }
 }
 
 impl Field for Value {
@@ -158,8 +181,9 @@ macro_rules! required {
 pub(super) use required;
 
 /// A record the auth cache holds as a pydantic model's JSON dump. The fields are that model's,
-/// in its order, which is the order they are written in, and each takes only the shapes the
-/// model takes, so nothing the model would refuse decodes or is written. A field the entry lacks
+/// in its order, which is the order they are written in, less an [`ExcludedIfNone`] one that is
+/// `None`. Each takes only the shapes the model takes, so nothing the model would refuse decodes
+/// or is written. A field the entry lacks
 /// takes the model's default, and one this build does not name is kept in `unread` and written
 /// after the named ones, so an entry a newer pod wrote loses nothing when it is read. A field
 /// held as plain data may hold credentials, so `Debug` redacts it.
@@ -206,8 +230,9 @@ macro_rules! record {
         impl IntoValue for $name {
             fn into_value(self) -> Value {
                 Value::Dict(
-                    [$((stringify!($field).to_owned(), Field::write(self.$field)),)+]
+                    [$((stringify!($field), Field::dump(self.$field)),)+]
                         .into_iter()
+                        .filter_map(|(name, value)| Some((name.to_owned(), value?)))
                         .chain(self.unread)
                         .map(|(name, value)| (Value::Str(name), value))
                         .collect(),
